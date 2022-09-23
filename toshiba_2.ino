@@ -1,18 +1,26 @@
+#include <ArduinoOTA.h>
+
 #include "arduino.h"
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ArduinoOTA.h>
 #include <AsyncMqttClient.h>
 #include <TelnetStream.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncElegantOTA.h>
 
-IPAddress ip(192, 168, 1, 150);
-IPAddress gateway(192, 168, 1, 254);
+IPAddress ip(192, 168, 40, 228);
+IPAddress gateway(192, 168, 40, 1);
 IPAddress subnet(255, 255, 255, 0);
-#define MQTT_HOST IPAddress(192, 168, 1, 113)
+#define MQTT_HOST IPAddress(192, 168, 40, 6)
 #define MQTT_PORT 1883
 const char *hostname = "heatpump";
 const char *ssid = "SSID";
-const char *password = "PASSWORD";
+const char *password = "password";
+const char *mqttUser = "username";
+const char *mqttPassword = "password";
+const char *otaUser = "username";
+const char *otaPassword = "password";
 
 const int LED = 2;
 bool led_state = 0;
@@ -20,6 +28,7 @@ bool led_state = 0;
 //*******constructors***********
 
 AsyncMqttClient mqttClient;
+AsyncWebServer server(80);
 
 //***********globals************
 int mqtt_status = false;
@@ -43,10 +52,12 @@ void setup() {
   mqttClient.onPublish(onMqttPublish);
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setClientId(hostname);
+  mqttClient.setCredentials(mqttUser, mqttPassword);
 
   WIFI_Connect();
   mqtt_connect();
   otastart();
+  startAsyncWebServer();
   TelnetStream.begin();
   digitalWrite(LED, true);
   start_handshake();
@@ -164,6 +175,10 @@ void serialHandler() {
               String sub1 = "/swingmode/state";
               mqtt_int(sub1, inttoswing(data[6]));
             }
+            if (data[5] == 247) {
+              String sub1 = "/specialmode/state";
+              mqtt_int(sub1, inttospecialmode(data[6]));
+            }
             if (data[5] == 176) {
               String mode = "off";
               String sub1 = "/mode/state";
@@ -274,7 +289,6 @@ String inttofanmode (byte val) {
   return reply;
 }
 
-
 int swingtoint(char *msg) {
   int retint = 0;
   if (strcmp(msg, "off") == 0) retint = 49;
@@ -303,6 +317,24 @@ String inttostate (byte val) {
   return reply;
 }
 
+int specialmodetoint(char *msg) {
+  int retint = 0;
+  if (strcmp(msg, "off") == 0) retint = 0;
+  if (strcmp(msg, "hi-power") == 0) retint = 1;
+  if (strcmp(msg, "silent") == 0) retint = 2;
+  if (strcmp(msg, "eco") == 0) retint = 3;
+  return retint;
+}
+
+String inttospecialmode (byte val) {
+  String reply;
+  if (val == 0) reply = "off";
+  if (val == 1) reply = "hi-power";
+  if (val == 2) reply = "silent";
+  if (val == 3) reply = "eco";
+  return reply;
+}
+
 int int_to_signed(int val) {
   if (val > 127) val = (256 - val) * -1;
   return val;
@@ -319,9 +351,20 @@ int checksum(int msg, int function) {
   return retval;
 }
 
+void startAsyncWebServer() {
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "Hi! I am ESP32.");
+  });
+
+  AsyncElegantOTA.begin(&server, otaUser, otaPassword);    // Start ElegantOTA
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
 void otastart() {
   ArduinoOTA.setHostname(hostname);
   ArduinoOTA.setPort(8266);
+  ArduinoOTA.setPassword(otaPassword);
   ArduinoOTA.onStart([]() {
     Serial.println("Start");
   });
@@ -451,6 +494,11 @@ void parse() {
       Serial.println(payload);
       modeControl(payload);
     }
+    if ( strcmp(topic, (hostname + String("/specialmode/set")).c_str()) == 0) {
+      Serial.print("specialmode ");
+      Serial.println(payload);
+      specialControl(payload);
+    }
     if ( strcmp(topic, (hostname + String("/doinit")).c_str()) == 0) {
       Serial.print("doinit ");
       Serial.println(payload);
@@ -507,6 +555,13 @@ void fanControl(char message[]) {
   send_code(function_code, function_value, rcv_code);
 }
 
+void specialControl(char message[]) {
+  int function_code = 247;
+  int function_value = specialmodetoint(message);
+  int rcv_code = 189;
+  send_code(function_code, function_value, rcv_code);
+}
+
 void stateControl(char message[]) {
   int function_code = 128;
   int function_value = statetoint(message);
@@ -535,6 +590,7 @@ void doinit() {
   //getcode(134,46);
   getcode(144, 36); //??
   getcode(148, 32); //??
+  getcode(247, 189); //Special mode
 }
 
 void dowatchdog() {
@@ -545,6 +601,7 @@ void dowatchdog() {
   getcode(179, 1); //setpoint
   getcode(160, 20); //fanmode
   getcode(163, 17); //swing mode
+  getcode(247, 189); //Special mode
 }
 
 void getcode(int function_code, int rcv_code) {
